@@ -18,48 +18,6 @@ if not api_key:
     raise ValueError("GEMINI_API_KEY is missing in environment variables")
 genai.configure(api_key=api_key)
 
-# --- NEW: Dynamic Model Selector ---
-def get_working_model():
-    """
-    Dynamically finds a model that supports generateContent.
-    Prioritizes Flash -> Pro -> Any.
-    """
-    print("Listing available models...")
-    try:
-        available_models = []
-        for m in genai.list_models():
-            if 'generateContent' in m.supported_generation_methods:
-                available_models.append(m.name)
-        
-        print(f"Found models: {available_models}")
-
-        # Priority List
-        # We strip 'models/' prefix if present for matching, but keep full name for usage
-        for model_id in available_models:
-            if "gemini-1.5-flash" in model_id:
-                return model_id
-        for model_id in available_models:
-            if "gemini-1.5-pro" in model_id:
-                return model_id
-        for model_id in available_models:
-            if "gemini-pro" in model_id:
-                return model_id
-                
-        # Fallback to the first available one if nothing matches preferences
-        if available_models:
-            return available_models[0]
-            
-        raise Exception("No models found that support generateContent.")
-        
-    except Exception as e:
-        print(f"Error listing models: {e}")
-        # Ultimate fallback if list_models fails (rare)
-        return "models/gemini-1.5-flash"
-
-# Set the model globally on startup
-ACTIVE_MODEL_NAME = get_working_model()
-print(f"--- SELECTED MODEL: {ACTIVE_MODEL_NAME} ---")
-
 class ProposalPDF(FPDF):
     def header(self):
         self.set_font("Helvetica", "B", 15)
@@ -92,7 +50,7 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
     else:
         raise HTTPException(status_code=400, detail="Please provide report_text or upload a file.")
 
-    # 2. Call Gemini API using the Auto-Detected Model
+    # 2. Call Gemini API
     prompt = f"""
     You are a professional grant writer. 
     Take the following feasibility report and rewrite it into a formal, highly professional Funding Proposal.
@@ -109,32 +67,50 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
     {content}
     """
 
-    max_retries = 3
-    base_delay = 100
+    # --- UPDATED STRATEGY: HARDCODED SAFE MODELS ---
+    # We explicitly list trusted models. 
+    # 'flash' is fast and high-quota. 'pro' is smarter but lower quota.
+    trusted_models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-1.0-pro"]
     
-    # Use the globally selected model
-    model = genai.GenerativeModel(ACTIVE_MODEL_NAME)
-
     proposal_text = ""
-    
-    for attempt in range(max_retries):
+    success = False
+    last_error = ""
+
+    for model_name in trusted_models:
+        if success: break
+        
+        print(f"--- Attempting generation with: {model_name} ---")
         try:
+            model = genai.GenerativeModel(model_name)
             response = model.generate_content(prompt)
             proposal_text = response.text
-            break
+            success = True
+            print(f"Success with {model_name}!")
+            
         except Exception as e:
-            print(f"printing exception1 {e}")
             error_str = str(e)
+            last_error = error_str
+            print(f"Failed with {model_name}. Error: {error_str}")
+            
+            # If it's a 429 (Busy) or 404 (Not Found), we continue to the next model.
+            # If it is a 400 (Bad Request), we stop because the input is likely wrong.
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                if attempt < max_retries - 1:
-                    # New wait times will be: 20s, 40s.
-                    wait_time = base_delay * (attempt + 1) 
-                    print(f"Rate limit hit. Retrying in {wait_time} seconds...")
-                    time.sleep(wait_time)
-                else:
-                    raise HTTPException(status_code=429, detail="Server is busy. Please try again later.")
+                print("Model busy/exhausted. Switching to next model...")
+                time.sleep(1) # Brief pause before switching
+                continue
+            elif "404" in error_str or "NOT_FOUND" in error_str:
+                print("Model not found. Switching...")
+                continue
             else:
+                # Critical error (e.g., API key invalid)
                 raise HTTPException(status_code=500, detail=f"Gemini API Error: {error_str}")
+
+    if not success:
+        # If we tried all models and failed
+        raise HTTPException(
+            status_code=429, 
+            detail=f"All AI models are currently busy or exhausted. Last error: {last_error}"
+        )
 
     # 3. Generate PDF
     try:
