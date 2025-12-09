@@ -1,5 +1,4 @@
 import os
-import time
 import requests
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException
@@ -16,6 +15,7 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     raise ValueError("GEMINI_API_KEY is missing in environment variables")
 
+# --- PDF Class ---
 class ProposalPDF(FPDF):
     def header(self):
         self.set_font("Helvetica", "B", 15)
@@ -31,87 +31,98 @@ def generate_pdf_from_text(text_content: str) -> bytes:
     pdf = ProposalPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", size=12)
-    # Sanitize text for PDF (replace unsupported characters)
     safe_text = text_content.encode('latin-1', 'replace').decode('latin-1')
     pdf.multi_cell(0, 10, text=safe_text)
     return pdf.output()
 
-def call_gemini_direct(prompt: str):
+# --- NEW: Dynamic Model Finder ---
+def find_best_model():
     """
-    Calls Gemini API directly via HTTP, bypassing the Python SDK.
-    Tries multiple model versions to ensure success.
+    Asks Google API: 'What models can I use?'
+    Returns the full name of the best available model (e.g., 'models/gemini-1.5-flash-001')
     """
+    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
+    print("--- Discovery: Finding available models... ---")
     
-    # We try these models in order. 
-    # 'gemini-1.5-flash' is the standard fast model.
-    # 'gemini-1.5-pro' is the smart backup.
-    # 'gemini-pro' is the legacy backup.
-    models = ["gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"]
-    
-    last_error = ""
-
-    for model in models:
-        print(f"--- Trying Direct API: {model} ---")
+    try:
+        response = requests.get(list_url, timeout=10)
+        if response.status_code != 200:
+            print(f"Discovery Failed: {response.text}")
+            return None
+            
+        data = response.json()
+        models = data.get('models', [])
         
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={API_KEY}"
-        headers = {"Content-Type": "application/json"}
-        payload = {
-            "contents": [{
-                "parts": [{"text": prompt}]
-            }]
-        }
+        # We only want models that can 'generateContent'
+        usable_models = [m for m in models if 'generateContent' in m.get('supportedGenerationMethods', [])]
+        
+        if not usable_models:
+            print("No usable models found.")
+            return None
 
-        try:
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            
-            # Check for HTTP 200 OK
-            if response.status_code == 200:
-                data = response.json()
-                try:
-                    # Extract text from JSON response
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
-                except (KeyError, IndexError):
-                    # Sometimes response is 200 but content is blocked/empty
-                    print(f"Model {model} returned 200 but no text. JSON: {data}")
-                    last_error = f"Model {model} returned empty response."
-                    continue
+        print(f"Found {len(usable_models)} models. Selecting best one...")
+        
+        # Priority Logic: Flash -> 1.5 Pro -> Any Pro
+        for m in usable_models:
+            if "flash" in m['name']: return m['name']
+        for m in usable_models:
+            if "1.5-pro" in m['name']: return m['name']
+        
+        # Fallback: Just take the first one
+        return usable_models[0]['name']
 
-            # Handle 429 (Rate Limit) explicitly
-            elif response.status_code == 429:
-                print(f"Model {model} is Busy (429). Switching...")
-                last_error = "Rate Limit Exceeded"
-                time.sleep(1) # Short breath
-                continue
-                
-            # Handle 404 (Model not found for this key)
-            elif response.status_code == 404:
-                print(f"Model {model} not found (404). Switching...")
-                last_error = f"Model {model} not found"
-                continue
-            
-            else:
-                # Other errors (500, 400, etc)
-                print(f"Model {model} failed with status {response.status_code}: {response.text}")
-                last_error = f"HTTP {response.status_code}: {response.text}"
-                continue
+    except Exception as e:
+        print(f"Discovery Error: {e}")
+        return None
 
-        except Exception as e:
-            print(f"Connection error with {model}: {str(e)}")
-            last_error = str(e)
-            continue
-            
-    # If loop finishes without returning, we failed.
-    raise Exception(f"All models failed. Last error: {last_error}")
+# --- Main Generation Logic ---
+def call_gemini_dynamic(prompt: str):
+    
+    # 1. Find the model dynamically
+    model_name = find_best_model()
+    
+    if not model_name:
+        # Emergency Fallback if discovery fails
+        model_name = "models/gemini-1.5-flash"
+        print("Discovery failed. Forcing fallback to gemini-1.5-flash")
+
+    print(f"--- Generating using model: {model_name} ---")
+
+    # 2. Construct URL (model_name already includes 'models/')
+    # If the discovered name is "models/gemini-1.5-flash", URL becomes:
+    # https://.../v1beta/models/gemini-1.5-flash:generateContent
+    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={API_KEY}"
+    
+    headers = {"Content-Type": "application/json"}
+    payload = {
+        "contents": [{
+            "parts": [{"text": prompt}]
+        }]
+    }
+
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        
+        if response.status_code == 200:
+            data = response.json()
+            try:
+                return data["candidates"][0]["content"]["parts"][0]["text"]
+            except Exception:
+                raise Exception(f"Empty/Blocked Response: {data}")
+        else:
+            raise Exception(f"Gemini Error ({response.status_code}): {response.text}")
+
+    except Exception as e:
+        raise Exception(f"Connection Failed: {str(e)}")
 
 @app.post("/generate-proposal/")
-# Note: Removed 'async' to allow synchronous requests library to run smoothly
 def generate_proposal(report_text: str = None, file: UploadFile = File(None)):
     
     # 1. Extract Content
     content = ""
     try:
         if file:
-            content_bytes = file.file.read() # Synchronous read
+            content_bytes = file.file.read()
             content = content_bytes.decode("utf-8")
         elif report_text:
             content = report_text
@@ -120,11 +131,11 @@ def generate_proposal(report_text: str = None, file: UploadFile = File(None)):
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error reading file: {str(e)}")
 
-    # 2. Call Gemini (Direct HTTP Method)
+    # 2. Call Gemini
     prompt = f"""
     You are a professional grant writer. 
     Take the following feasibility report and rewrite it into a formal Funding Proposal.
-    Keep it strictly text-based (no markdown bold/italic) for PDF compatibility.
+    Keep it strictly text-based for PDF compatibility.
     
     Sections:
     1. EXECUTIVE SUMMARY
@@ -137,19 +148,18 @@ def generate_proposal(report_text: str = None, file: UploadFile = File(None)):
     REPORT:
     {content[:10000]} 
     """
-    # Note: I limited input to 10k chars to prevent token errors
 
     try:
-        proposal_text = call_gemini_direct(prompt)
+        proposal_text = call_gemini_dynamic(prompt)
     except Exception as e:
-        # Return the exact error to the user so we can see it
-        raise HTTPException(status_code=500, detail=f"AI Generation Failed: {str(e)}")
+        # Return exact error for debugging
+        raise HTTPException(status_code=500, detail=f"AI Error: {str(e)}")
 
     # 3. Generate PDF
     try:
         pdf_bytes = generate_pdf_from_text(proposal_text)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"PDF Generation Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"PDF Error: {str(e)}")
 
     return Response(
         content=bytes(pdf_bytes),
