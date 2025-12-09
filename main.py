@@ -110,7 +110,7 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
     """
 
     max_retries = 3
-    base_delay = 5
+    base_delay = 25
     
     # Use the globally selected model
     model = genai.GenerativeModel(ACTIVE_MODEL_NAME)
@@ -126,7 +126,8 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
             error_str = str(e)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                 if attempt < max_retries - 1:
-                    wait_time = base_delay * (2 ** attempt)
+                    # New wait times will be: 20s, 40s.
+                    wait_time = base_delay * (attempt + 1) 
                     print(f"Rate limit hit. Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
