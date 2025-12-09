@@ -1,9 +1,9 @@
 import os
-import time 
+import time
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import Response
-from google import genai
+import google.generativeai as genai  # CHANGED: Standard library
 from fpdf import FPDF
 from dotenv import load_dotenv
 
@@ -12,9 +12,8 @@ load_dotenv()
 
 app = FastAPI(title="Gemini Funding Proposal Generator")
 
-# Initialize Gemini Client
-# Make sure GEMINI_API_KEY is set in your environment
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+# Configure Gemini (Standard Method)
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 class ProposalPDF(FPDF):
     def header(self):
@@ -32,8 +31,7 @@ def generate_pdf_from_text(text_content: str) -> bytes:
     pdf.add_page()
     pdf.set_font("Helvetica", size=12)
     
-    # fpdf2 handles unicode and wrapping much better than old fpdf
-    # We clean the text slightly to ensure compatibility
+    # fpdf2 handles unicode cleanup
     safe_text = text_content.encode('latin-1', 'replace').decode('latin-1')
     
     pdf.multi_cell(0, 10, text=safe_text)
@@ -43,7 +41,6 @@ def generate_pdf_from_text(text_content: str) -> bytes:
 async def generate_proposal(report_text: str = None, file: UploadFile = File(None)):
     """
     Send raw text OR upload a text/markdown file.
-    Includes retry logic for 429 errors.
     """
     
     # 1. Extract Content
@@ -56,7 +53,7 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
     else:
         raise HTTPException(status_code=400, detail="Please provide report_text or upload a file.")
 
-    # 2. Call Gemini API with Retry Logic
+    # 2. Call Gemini API (Updated for google-generativeai)
     prompt = f"""
     You are a professional grant writer. 
     Take the following feasibility report and rewrite it into a formal, highly professional Funding Proposal.
@@ -74,31 +71,29 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
     """
 
     max_retries = 3
-    base_delay = 5  # seconds
+    base_delay = 5
+    
+    # Initialize the model - 1.5-flash is stable here
+    model = genai.GenerativeModel("gemini-1.5-flash") 
 
     proposal_text = ""
     
     for attempt in range(max_retries):
         try:
-            # We switched to 1.5-flash here for better availability
-            response = client.models.generate_content(
-                model="gemini-1.5-flash", 
-                contents=prompt
-            )
+            response = model.generate_content(prompt)
             proposal_text = response.text
-            break # Success, exit loop
+            break
         except Exception as e:
-            # Check if it's a 429 error (Resource Exhausted)
             error_str = str(e)
+            # Check for Rate Limits (429)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                 if attempt < max_retries - 1:
-                    wait_time = base_delay * (2 ** attempt) # Exponential backoff: 5s, 10s, 20s
+                    wait_time = base_delay * (2 ** attempt)
                     print(f"Rate limit hit. Retrying in {wait_time} seconds...")
                     time.sleep(wait_time)
                 else:
-                    raise HTTPException(status_code=429, detail="Server is busy (Rate Limit Exceeded). Please try again later.")
+                    raise HTTPException(status_code=429, detail="Server is busy. Please try again later.")
             else:
-                # If it's another error, fail immediately
                 raise HTTPException(status_code=500, detail=f"Gemini API Error: {error_str}")
 
     # 3. Generate PDF
@@ -107,7 +102,6 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"PDF Generation Error: {str(e)}")
 
-    # 4. Return the file
     return Response(
         content=bytes(pdf_bytes),
         media_type="application/pdf",
