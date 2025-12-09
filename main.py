@@ -3,7 +3,7 @@ import time
 import uvicorn
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import Response
-import google.generativeai as genai  # CHANGED: Standard library
+import google.generativeai as genai
 from fpdf import FPDF
 from dotenv import load_dotenv
 
@@ -12,8 +12,53 @@ load_dotenv()
 
 app = FastAPI(title="Gemini Funding Proposal Generator")
 
-# Configure Gemini (Standard Method)
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+# Configure Gemini
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise ValueError("GEMINI_API_KEY is missing in environment variables")
+genai.configure(api_key=api_key)
+
+# --- NEW: Dynamic Model Selector ---
+def get_working_model():
+    """
+    Dynamically finds a model that supports generateContent.
+    Prioritizes Flash -> Pro -> Any.
+    """
+    print("Listing available models...")
+    try:
+        available_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+        
+        print(f"Found models: {available_models}")
+
+        # Priority List
+        # We strip 'models/' prefix if present for matching, but keep full name for usage
+        for model_id in available_models:
+            if "gemini-1.5-flash" in model_id:
+                return model_id
+        for model_id in available_models:
+            if "gemini-1.5-pro" in model_id:
+                return model_id
+        for model_id in available_models:
+            if "gemini-pro" in model_id:
+                return model_id
+                
+        # Fallback to the first available one if nothing matches preferences
+        if available_models:
+            return available_models[0]
+            
+        raise Exception("No models found that support generateContent.")
+        
+    except Exception as e:
+        print(f"Error listing models: {e}")
+        # Ultimate fallback if list_models fails (rare)
+        return "models/gemini-1.5-flash"
+
+# Set the model globally on startup
+ACTIVE_MODEL_NAME = get_working_model()
+print(f"--- SELECTED MODEL: {ACTIVE_MODEL_NAME} ---")
 
 class ProposalPDF(FPDF):
     def header(self):
@@ -30,18 +75,12 @@ def generate_pdf_from_text(text_content: str) -> bytes:
     pdf = ProposalPDF()
     pdf.add_page()
     pdf.set_font("Helvetica", size=12)
-    
-    # fpdf2 handles unicode cleanup
     safe_text = text_content.encode('latin-1', 'replace').decode('latin-1')
-    
     pdf.multi_cell(0, 10, text=safe_text)
     return pdf.output()
 
 @app.post("/generate-proposal/")
 async def generate_proposal(report_text: str = None, file: UploadFile = File(None)):
-    """
-    Send raw text OR upload a text/markdown file.
-    """
     
     # 1. Extract Content
     content = ""
@@ -53,7 +92,7 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
     else:
         raise HTTPException(status_code=400, detail="Please provide report_text or upload a file.")
 
-    # 2. Call Gemini API (Updated for google-generativeai)
+    # 2. Call Gemini API using the Auto-Detected Model
     prompt = f"""
     You are a professional grant writer. 
     Take the following feasibility report and rewrite it into a formal, highly professional Funding Proposal.
@@ -73,8 +112,8 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
     max_retries = 3
     base_delay = 5
     
-    # Initialize the model - 1.5-flash is stable here
-    model = genai.GenerativeModel("gemini-1.5-flash") 
+    # Use the globally selected model
+    model = genai.GenerativeModel(ACTIVE_MODEL_NAME)
 
     proposal_text = ""
     
@@ -85,7 +124,6 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
             break
         except Exception as e:
             error_str = str(e)
-            # Check for Rate Limits (429)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                 if attempt < max_retries - 1:
                     wait_time = base_delay * (2 ** attempt)
