@@ -110,7 +110,7 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
     """
 
     max_retries = 3
-    base_delay = 25
+    base_delay = 100
     
     # Use the globally selected model
     model = genai.GenerativeModel(ACTIVE_MODEL_NAME)
@@ -123,6 +123,7 @@ async def generate_proposal(report_text: str = None, file: UploadFile = File(Non
             proposal_text = response.text
             break
         except Exception as e:
+            print(f"printing exception1 {e}")
             error_str = str(e)
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
                 if attempt < max_retries - 1:
