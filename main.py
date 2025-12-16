@@ -16,6 +16,9 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 if not API_KEY:
     raise ValueError("GEMINI_API_KEY is missing in environment variables")
 
+# --- HARDCODED MODEL: gemini-2.5-flash-lite ---
+MODEL_NAME = "models/gemini-2.5-flash-lite"
+
 # --- PDF CLASS ---
 class ProposalPDF(FPDF):
     def header(self):
@@ -47,59 +50,6 @@ def generate_pdf_from_text(text_content: str) -> bytes:
     # Render content
     pdf.multi_cell(0, 8, text=safe_text, markdown=True)
     return pdf.output()
-
-# --- IMPROVED MODEL FINDER: STRICTLY PRIORITIZES GEMINI-2.5-FLASH-LITE ---
-def find_best_model():
-    """
-    Dynamically discovers available models and prioritizes gemini-2.5-flash-lite first.
-    """
-    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={API_KEY}"
-    print("--- Discovery: Finding available models... ---")
-
-    try:
-        response = requests.get(list_url, timeout=10)
-        if response.status_code != 200:
-            print("Discovery failed, falling back to gemini-2.5-flash-lite")
-            return "models/gemini-2.5-flash-lite"
-
-        data = response.json()
-        all_models = data.get('models', [])
-        usable_models = [
-            m['name'] for m in all_models
-            if 'generateContent' in m.get('supportedGenerationMethods', [])
-        ]
-
-        print(f"Found {len(usable_models)} usable models.")
-
-        # Priority order (as of December 2025):
-        # 1. gemini-2.5-flash-lite (stable, cost-efficient, low latency)
-        for m in usable_models:
-            if "flash-lite" in m.lower():
-                print(f"Selected lite model: {m}")
-                return m
-
-        # 2. Standard gemini-2.5-flash
-        for m in usable_models:
-            if "2.5-flash" in m and "lite" not in m.lower():
-                print(f"Selected standard flash: {m}")
-                return m
-
-        # 3. Any older flash-lite
-        for m in usable_models:
-            if "flash-lite" in m.lower():
-                return m
-
-        # 4. Fallback to any 1.5-flash or pro
-        for m in usable_models:
-            if "flash" in m or "pro" in m:
-                return m
-
-        # Final fallback
-        return usable_models[0] if usable_models else "models/gemini-2.5-flash-lite"
-
-    except Exception as e:
-        print(f"Discovery Error: {e}")
-        return "models/gemini-2.5-flash-lite"
 
 # --- MAIN ENDPOINT ---
 @app.post("/generate-proposal/")
@@ -140,11 +90,10 @@ def generate_proposal(report_text: str = None, file: UploadFile = File(None)):
     {content[:20000]}
     """
 
-    # 3. Select Model
-    model_name = find_best_model()
-    print(f"--- SELECTED MODEL: {model_name} ---")
+    # 3. Use Hardcoded Model
+    print(f"--- USING HARDCODED MODEL: {MODEL_NAME} ---")
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/{model_name}:generateContent?key={API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/{MODEL_NAME}:generateContent?key={API_KEY}"
 
     # 4. Call AI with Retry Logic for 503 Overload
     proposal_text = ""
@@ -155,13 +104,13 @@ def generate_proposal(report_text: str = None, file: UploadFile = File(None)):
                 url,
                 headers={"Content-Type": "application/json"},
                 json={"contents": [{"parts": [{"text": prompt}]}]},
-                timeout=120  # Increased timeout for potentially slower lite model
+                timeout=120
             )
 
             if resp.status_code == 503:
                 print(f"Attempt {attempt + 1}: Model overloaded (503). Retrying in {2 ** attempt} seconds...")
                 if attempt < max_retries - 1:
-                    time.sleep(2 ** attempt)  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                    time.sleep(2 ** attempt)  # Exponential backoff
                     continue
                 else:
                     raise Exception("Max retries exceeded: Model remains overloaded.")
