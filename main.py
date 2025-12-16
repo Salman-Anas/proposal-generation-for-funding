@@ -58,8 +58,8 @@ def find_best_model():
     try:
         response = requests.get(list_url, timeout=10)
         if response.status_code != 200: 
-            print("Discovery failed, defaulting to hardcoded 2.5-flash-lite")
-            return "models/gemini-2.5-flash-lite"
+            print("Discovery failed, defaulting to hardcoded 2.5-flash")
+            return "models/gemini-2.5-flash"
             
         data = response.json()
         all_models = data.get('models', [])
@@ -70,7 +70,7 @@ def find_best_model():
         # --- PRIORITY LOGIC ---
         # 1. User's Top Choice: Gemini 2.5 Flash-Lite
         for m in usable_models:
-            if "2.5-flash-lite" in m: 
+            if "2.5-flash" in m: 
                 return m
         
         # 2. Strong Alternative: Gemini 2.5 Flash (Standard)
@@ -93,11 +93,11 @@ def find_best_model():
             if "pro" in m: 
                 return m
 
-        return usable_models[0] if usable_models else "models/gemini-2.5-flash-lite"
+        return usable_models[0] if usable_models else "models/gemini-2.5-flash"
 
     except Exception as e:
         print(f"Discovery Error: {e}")
-        return "models/gemini-2.5-flash-lite"
+        return "models/gemini-2.5-flash"
 
 # --- MAIN ENDPOINT ---
 @app.post("/generate-proposal/")
